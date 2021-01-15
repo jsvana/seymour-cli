@@ -29,6 +29,12 @@ enum Subcommand {
     /// List all subscriptions
     #[structopt(alias = "subscriptions")]
     ListSubscriptions,
+
+    /// Subscribe to a new feed
+    Subscribe {
+        /// Feed URL to add
+        url: String,
+    },
 }
 
 #[derive(Debug, StructOpt)]
@@ -97,27 +103,27 @@ async fn connect(
         .ok_or_else(|| format_err!("missing server address"))?;
     let stream = TcpStream::connect(&address).await?;
 
-    let (reader, writer) = tokio::io::split(stream);
+    let (reader, mut writer) = tokio::io::split(stream);
 
     let server_reader = BufReader::new(reader);
-    let lines = server_reader.lines();
-
-    Ok((lines, writer))
-}
-
-async fn cmd_unread(config: Config, no_mark_read: bool) -> Result<()> {
-    let (mut lines, mut writer) = connect(&config).await?;
+    let mut lines = server_reader.lines();
 
     send(
         &mut writer,
         Command::User {
-            username: config.user,
+            username: config.user.to_string(),
         },
     )
     .await?;
 
     let response: Response = receive(&mut lines).await?;
     check_response!(Response::AckUser { .. }, response);
+
+    Ok((lines, writer))
+}
+
+async fn cmd_unread(config: Config, no_mark_read: bool) -> Result<()> {
+    let (mut lines, mut writer) = connect(&config).await?;
 
     send(&mut writer, Command::ListUnread).await?;
 
@@ -184,17 +190,6 @@ async fn cmd_unread(config: Config, no_mark_read: bool) -> Result<()> {
 async fn cmd_list_subscriptions(config: Config) -> Result<()> {
     let (mut lines, mut writer) = connect(&config).await?;
 
-    send(
-        &mut writer,
-        Command::User {
-            username: config.user,
-        },
-    )
-    .await?;
-
-    let response: Response = receive(&mut lines).await?;
-    check_response!(Response::AckUser { .. }, response);
-
     send(&mut writer, Command::ListSubscriptions).await?;
 
     let response: Response = receive(&mut lines).await?;
@@ -237,6 +232,19 @@ async fn cmd_list_subscriptions(config: Config) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_subscribe(config: Config, url: String) -> Result<()> {
+    let (mut lines, mut writer) = connect(&config).await?;
+
+    send(&mut writer, Command::Subscribe { url }).await?;
+
+    let response: Response = receive(&mut lines).await?;
+    check_response!(Response::AckSubscribe, response);
+
+    println!("Added");
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::from_args();
@@ -260,5 +268,6 @@ async fn main() -> Result<()> {
     match args.subcommand {
         Subcommand::Unread { no_mark_read } => cmd_unread(config, no_mark_read).await,
         Subcommand::ListSubscriptions => cmd_list_subscriptions(config).await,
+        Subcommand::Subscribe { url } => cmd_subscribe(config, url).await,
     }
 }
