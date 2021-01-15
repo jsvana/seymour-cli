@@ -57,6 +57,21 @@ struct Entry {
     title: String,
 }
 
+macro_rules! check_response {
+    ($variant:pat, $response:expr) => {
+        match $response {
+            $variant => {}
+            _ => {
+                return Err(format_err!(
+                    "unexpected response (expected {:?}): {}",
+                    stringify!($variant),
+                    $response
+                ));
+            }
+        }
+    };
+}
+
 async fn cmd_unread(config: Config) -> Result<()> {
     let address = config
         .host_port
@@ -79,28 +94,12 @@ async fn cmd_unread(config: Config) -> Result<()> {
     .await?;
 
     let response: Response = receive(&mut lines).await?;
-    match response {
-        Response::AckUser { .. } => {}
-        _ => {
-            return Err(format_err!(
-                "unexpected response (expected AckUser): {}",
-                response
-            ));
-        }
-    }
+    check_response!(Response::AckUser { .. }, response);
 
     send(&mut writer, Command::ListUnread).await?;
 
     let response: Response = receive(&mut lines).await?;
-    match response {
-        Response::StartEntryList => {}
-        _ => {
-            return Err(format_err!(
-                "unexpected response (expected StartEntryList): {}",
-                response
-            ));
-        }
-    }
+    check_response!(Response::StartEntryList, response);
 
     let mut entries = Vec::new();
     loop {
@@ -124,7 +123,7 @@ async fn cmd_unread(config: Config) -> Result<()> {
             }
             _ => {
                 return Err(format_err!(
-                    "unexpected response (expected StartEntryList): {}",
+                    "unexpected response (expected Entry or EndList): {}",
                     response
                 ));
             }
