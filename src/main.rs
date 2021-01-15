@@ -7,7 +7,7 @@ use serde_derive::Deserialize;
 use seymour_protocol::{Command, Response};
 use structopt::StructOpt;
 use tokio::io::{
-    AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Lines, WriteHalf,
+    AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf,
 };
 use tokio::net::TcpStream;
 
@@ -19,7 +19,16 @@ struct Config {
 
 #[derive(Debug, StructOpt)]
 enum Subcommand {
-    Unread,
+    /// List unread feed entries
+    Unread {
+        /// Don't mark entries as read as they're listed
+        #[structopt(long)]
+        no_mark_read: bool,
+    },
+
+    /// List all subscriptions
+    #[structopt(alias = "subscriptions")]
+    ListSubscriptions,
 }
 
 #[derive(Debug, StructOpt)]
@@ -57,6 +66,12 @@ struct Entry {
     title: String,
 }
 
+#[derive(Debug)]
+struct Subscription {
+    id: i64,
+    url: String,
+}
+
 macro_rules! check_response {
     ($variant:pat, $response:expr) => {
         match $response {
@@ -72,7 +87,9 @@ macro_rules! check_response {
     };
 }
 
-async fn cmd_unread(config: Config) -> Result<()> {
+async fn connect(
+    config: &Config,
+) -> Result<(Lines<BufReader<ReadHalf<TcpStream>>>, WriteHalf<TcpStream>)> {
     let address = config
         .host_port
         .to_socket_addrs()?
@@ -80,10 +97,16 @@ async fn cmd_unread(config: Config) -> Result<()> {
         .ok_or_else(|| format_err!("missing server address"))?;
     let stream = TcpStream::connect(&address).await?;
 
-    let (reader, mut writer) = tokio::io::split(stream);
+    let (reader, writer) = tokio::io::split(stream);
 
     let server_reader = BufReader::new(reader);
-    let mut lines = server_reader.lines();
+    let lines = server_reader.lines();
+
+    Ok((lines, writer))
+}
+
+async fn cmd_unread(config: Config, no_mark_read: bool) -> Result<()> {
+    let (mut lines, mut writer) = connect(&config).await?;
 
     send(
         &mut writer,
@@ -132,33 +155,84 @@ async fn cmd_unread(config: Config) -> Result<()> {
 
     if entries.is_empty() {
         println!("No new items");
-    } else {
-        println!("{} new item(s)", entries.len());
+        return Ok(());
+    }
 
-        let mut table = Table::new();
-        table.set_format(*format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR);
+    println!("{} new item(s)", entries.len());
 
-        table.set_titles(row!["url", "title"]);
+    let mut table = Table::new();
+    table.set_format(*format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR);
 
-        for entry in entries {
-            table.add_row(row![entry.full_url, entry.title]);
+    table.set_titles(row!["url", "title"]);
 
+    for entry in entries {
+        table.add_row(row![entry.full_url, entry.title]);
+
+        if !no_mark_read {
             send(&mut writer, Command::MarkRead { id: entry.id }).await?;
 
             let response: Response = receive(&mut lines).await?;
-            match response {
-                Response::AckMarkRead => {}
-                _ => {
-                    return Err(format_err!(
-                        "unexpected response (expected AckMarkRead): {}",
-                        response
-                    ));
-                }
+            check_response!(Response::AckMarkRead, response);
+        }
+    }
+
+    table.printstd();
+
+    Ok(())
+}
+
+async fn cmd_list_subscriptions(config: Config) -> Result<()> {
+    let (mut lines, mut writer) = connect(&config).await?;
+
+    send(
+        &mut writer,
+        Command::User {
+            username: config.user,
+        },
+    )
+    .await?;
+
+    let response: Response = receive(&mut lines).await?;
+    check_response!(Response::AckUser { .. }, response);
+
+    send(&mut writer, Command::ListSubscriptions).await?;
+
+    let response: Response = receive(&mut lines).await?;
+    check_response!(Response::StartSubscriptionList, response);
+
+    let mut subscriptions = Vec::new();
+    loop {
+        let response: Response = receive(&mut lines).await?;
+        match response {
+            Response::Subscription { id, url } => {
+                subscriptions.push(Subscription { id, url });
+            }
+            Response::EndList => {
+                break;
+            }
+            _ => {
+                return Err(format_err!(
+                    "unexpected response (expected Subscription or EndList): {}",
+                    response
+                ));
             }
         }
-
-        table.printstd();
     }
+
+    if subscriptions.is_empty() {
+        println!("No subscriptions");
+    }
+
+    let mut table = Table::new();
+    table.set_format(*format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR);
+
+    table.set_titles(row!["url"]);
+
+    for entry in subscriptions {
+        table.add_row(row![entry.url]);
+    }
+
+    table.printstd();
 
     Ok(())
 }
@@ -184,6 +258,7 @@ async fn main() -> Result<()> {
     .with_context(|| format_err!("failed to parse config file at {:?}", config_file))?;
 
     match args.subcommand {
-        Subcommand::Unread => cmd_unread(config).await,
+        Subcommand::Unread { no_mark_read } => cmd_unread(config, no_mark_read).await,
+        Subcommand::ListSubscriptions => cmd_list_subscriptions(config).await,
     }
 }
